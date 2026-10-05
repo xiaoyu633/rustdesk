@@ -238,11 +238,15 @@ jobs:
             libxkbcommon-dev libxkbcommon-x11-dev \
             libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev \
             clang cmake nasm patchelf \
-            libyuv-dev pkg-config
+            libyuv-dev libvpx-dev libaom-dev pkg-config
 
-      # scrap 构建脚本优先走 pkg-config（feature=linux-pkg-config）。
-      # 但 Ubuntu 的 libyuv-dev 不提供 libyuv.pc，需要手工补一个，否则会
-      # 回落到 vcpkg/homebrew 分支并 panic（VCPKG_ROOT 未设置）。
+      # scrap 的 build.rs 需要三个库：
+      #   find_package("libyuv")          -> pkg-config libyuv
+      #   gen_vcpkg_package("libvpx")     -> pkg-config vpx
+      #   gen_vcpkg_package("aom")        -> pkg-config aom
+      # libvpx-dev 自带 vpx.pc，libaom-dev 自带 aom.pc，
+      # 但 Ubuntu 的 libyuv-dev 不提供 libyuv.pc，需要手工补一个，
+      # 否则会回落到 vcpkg/homebrew 分支并 panic。
       - name: 为 libyuv 生成 pkg-config 描述文件
         run: |
           ARCH=$(dpkg-architecture -qDEB_HOST_MULTIARCH 2>/dev/null || echo "aarch64-linux-gnu")
@@ -258,11 +262,16 @@ jobs:
           Libs: -L\${libdir} -lyuv
           Cflags: -I\${includedir}
           EOF
-          echo "--- 生成的 libyuv.pc ---"
-          cat /usr/lib/${ARCH}/pkgconfig/libyuv.pc
-          echo "--- pkg-config 验证 ---"
-          pkg-config --exists libyuv && echo "OK: pkg-config found libyuv" || { echo "FAIL: pkg-config cannot find libyuv"; exit 1; }
-          pkg-config --cflags --libs libyuv
+
+          echo "--- 逐一验证 scrap 所需的三个库 ---"
+          for lib in libyuv vpx aom; do
+            if pkg-config --exists "$lib"; then
+              echo "OK   $lib -> $(pkg-config --modversion $lib)"
+            else
+              echo "FAIL $lib not found by pkg-config"
+              exit 1
+            fi
+          done
 
       - name: 克隆源码（含 submodule）
         run: |
