@@ -73,20 +73,26 @@ echo ""
 # ---------- 执行注入 ----------
 # 用 python 保证跨平台（windows runner 的 sed 行为不同）
 python3 - "$CFG" "$RD_SERVER" "$RD_KEY" <<'PYEOF'
-import re, sys
+import re, sys, io
+
+# Windows console defaults to cp1252/GBK; force UTF-8 to avoid UnicodeEncodeError
+try:
+    sys.stdout.reconfigure(encoding='utf-8', errors='replace')
+except Exception:
+    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
 
 path, server, key = sys.argv[1], sys.argv[2], sys.argv[3]
 s = open(path, encoding='utf-8').read()
 orig = s
 
-# 1) RENDEZVOUS_SERVERS —— 形如 &["rs-ny.rustdesk.com"]
+# 1) RENDEZVOUS_SERVERS, e.g. &["rs-ny.rustdesk.com"]
 pat_servers = re.compile(
     r'pub const RENDEZVOUS_SERVERS:\s*&\[&str\]\s*=\s*&\[[^\]]*\]\s*;'
 )
 s, n1 = pat_servers.subn(
     f'pub const RENDEZVOUS_SERVERS: &[&str] = &["{server}"];', s)
 
-# 2) RS_PUB_KEY —— 形如 "OeVuKk..."
+# 2) RS_PUB_KEY, e.g. "OeVuKk..."
 pat_key = re.compile(
     r'pub const RS_PUB_KEY:\s*&str\s*=\s*"[^"]*"\s*;'
 )
@@ -94,19 +100,19 @@ s, n2 = pat_key.subn(
     f'pub const RS_PUB_KEY: &str = "{key}";', s)
 
 if s == orig:
-    print("❌ 没有任何替换发生！源码结构可能已变化。")
-    print("   请检查 config.rs 中是否仍存在 RENDEZVOUS_SERVERS / RS_PUB_KEY")
+    print("[FAIL] no substitution happened; source layout may have changed")
+    print("       check that config.rs still contains RENDEZVOUS_SERVERS / RS_PUB_KEY")
     sys.exit(1)
 
 open(path, 'w', encoding='utf-8').write(s)
-print(f"✅ RENDEZVOUS_SERVERS 替换 {n1} 处")
-print(f"✅ RS_PUB_KEY 替换 {n2} 处")
+print(f"[OK] RENDEZVOUS_SERVERS replaced: {n1}")
+print(f"[OK] RS_PUB_KEY replaced: {n2}")
 
 if n1 == 0:
-    print("⚠️  RENDEZVOUS_SERVERS 未替换成功，客户端会连不上自建服务器！")
+    print("[FAIL] RENDEZVOUS_SERVERS not replaced - client would connect to official servers")
     sys.exit(1)
 if n2 == 0:
-    print("⚠️  RS_PUB_KEY 未替换成功，加密握手会失败！")
+    print("[FAIL] RS_PUB_KEY not replaced - encrypted handshake would fail")
     sys.exit(1)
 PYEOF
 
@@ -123,21 +129,26 @@ if [ -n "$RD_API_OVERRIDE" ]; then
   COMMON="$SOURCE_DIR/src/common.rs"
   if [ -f "$COMMON" ]; then
     python3 - "$COMMON" "$RD_API_OVERRIDE" <<'PYEOF'
-import re, sys
+import re, sys, io
+try:
+    sys.stdout.reconfigure(encoding='utf-8', errors='replace')
+except Exception:
+    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
+
 path, api = sys.argv[1], sys.argv[2]
 s = open(path, encoding='utf-8').read()
 
-# 在 get_api_server_ 的最终 fallback 前插入硬编码返回
-# 原：    "https://admin.rustdesk.com".to_owned()
-# 改为：  "<我们的API>".to_owned()
+# Hardcode the final fallback inside get_api_server_
+# before: "https://admin.rustdesk.com".to_owned()
+# after:  "<our API>".to_owned()
 old = '"https://admin.rustdesk.com".to_owned()'
 if old in s:
-    # 只替换 get_api_server_ 内的那处（该字符串全文唯一）
+    # only that occurrence inside get_api_server_ (unique in file)
     s = s.replace(old, f'"{api}".to_owned()')
     open(path, 'w', encoding='utf-8').write(s)
-    print(f"✅ API fallback 已改为 {api}")
+    print(f"[OK] API fallback set to {api}")
 else:
-    print("⚠️  未找到 admin.rustdesk.com fallback，跳过")
+    print("[WARN] admin.rustdesk.com fallback not found, skipped")
 PYEOF
     echo ""
     grep -n "admin.rustdesk.com\|fuyou135" "$COMMON" | head -5 || true
