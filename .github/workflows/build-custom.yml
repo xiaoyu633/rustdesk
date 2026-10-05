@@ -238,16 +238,19 @@ jobs:
             libxkbcommon-dev libxkbcommon-x11-dev \
             libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev \
             clang cmake nasm patchelf \
-            libyuv-dev libvpx-dev libaom-dev pkg-config
+            pkg-config \
+            libaom-dev libvpx-dev libyuv-dev libopus-dev libjpeg-turbo8-dev
 
-      # scrap 的 build.rs 需要三个库：
-      #   find_package("libyuv")          -> pkg-config libyuv
-      #   gen_vcpkg_package("libvpx")     -> pkg-config vpx
-      #   gen_vcpkg_package("aom")        -> pkg-config aom
-      # libvpx-dev 自带 vpx.pc，libaom-dev 自带 aom.pc，
-      # 但 Ubuntu 的 libyuv-dev 不提供 libyuv.pc，需要手工补一个，
-      # 否则会回落到 vcpkg/homebrew 分支并 panic。
-      - name: 为 libyuv 生成 pkg-config 描述文件
+      # RustDesk 的 C/C++ 依赖（来自官方 vcpkg.json 的权威清单）：
+      #   scrap        -> libyuv, libvpx(vpx), aom
+      #   magnum-opus  -> opus
+      #   libjpeg-turbo-> jpeg
+      # 说明：
+      #   - libaom-dev / libvpx-dev / libopus-dev / libjpeg-turbo8-dev 自带 .pc，无需处理
+      #   - Ubuntu 的 libyuv-dev 不提供 libyuv.pc，必须手工生成
+      #   - libsodium 仅 windows&arm64 需要、ffmpeg 需 static 且仅 x86/x64/win/osx，
+      #     二者在 linux-arm64 上都不需要安装
+      - name: 为 libyuv 生成 pkg-config 描述文件并校验全部依赖
         run: |
           ARCH=$(dpkg-architecture -qDEB_HOST_MULTIARCH 2>/dev/null || echo "aarch64-linux-gnu")
           sudo tee /usr/lib/${ARCH}/pkgconfig/libyuv.pc > /dev/null <<EOF
@@ -263,15 +266,18 @@ jobs:
           Cflags: -I\${includedir}
           EOF
 
-          echo "--- 逐一验证 scrap 所需的三个库 ---"
-          for lib in libyuv vpx aom; do
+          echo "=== 校验 RustDesk 所需的全部系统库 ==="
+          FAILED=0
+          for lib in libyuv vpx aom opus libjpeg; do
             if pkg-config --exists "$lib"; then
               echo "OK   $lib -> $(pkg-config --modversion $lib)"
             else
               echo "FAIL $lib not found by pkg-config"
-              exit 1
+              FAILED=1
             fi
           done
+          [ "$FAILED" -eq 0 ] || { echo "缺少依赖，中止构建"; exit 1; }
+          echo "=== 全部依赖就绪 ==="
 
       - name: 克隆源码（含 submodule）
         run: |
