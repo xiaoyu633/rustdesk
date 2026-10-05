@@ -1,0 +1,297 @@
+name: Build Custom RustDesk Clients
+
+# ============================================================
+# 为自建 RustDesk 服务器构建定制客户端
+# 服务器：rd.fuyou135.cn / id.fuyou135.cn
+# ============================================================
+# 触发方式：
+#   1. 手动触发（Actions 页面 Run workflow）
+#   2. 推送 config/custom.txt 变更时自动触发
+#   3. 定时检查上游新版本（每天 UTC 2:00 = 北京时间 10:00）
+on:
+  workflow_dispatch:
+    inputs:
+      rustdesk_version:
+        description: 'RustDesk 版本 (留空=最新版)'
+        required: false
+        default: ''
+  push:
+    paths:
+      - 'config/custom.txt'
+      - '.github/workflows/build-custom.yml'
+      - 'scripts/inject-config.sh'
+  schedule:
+    - cron: '0 2 * * *'
+
+permissions:
+  contents: write
+
+jobs:
+  # ============================================
+  # 任务0：检测上游最新版本 & 判断是否需要构建
+  # ============================================
+  check-version:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.ver.outputs.version }}
+      need_build: ${{ steps.ver.outputs.need_build }}
+    steps:
+      - name: 检出仓库
+        uses: actions/checkout@v4
+
+      - name: 检测最新版本
+        id: ver
+        run: |
+          if [ -n "${{ github.event.inputs.rustdesk_version }}" ]; then
+            VERSION="${{ github.event.inputs.rustdesk_version }}"
+          else
+            VERSION=$(curl -sL https://api.github.com/repos/rustdesk/rustdesk/releases/latest | jq -r '.tag_name // empty')
+            [ -z "$VERSION" ] && VERSION=$(curl -sL "https://api.github.com/repos/rustdesk/rustdesk/tags?per_page=1" | jq -r '.[0].name // empty')
+          fi
+          echo "上游最新版本: $VERSION"
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+
+          if gh release view "custom-$VERSION" >/dev/null 2>&1; then
+            echo "该版本已构建过，跳过"
+            echo "need_build=false" >> $GITHUB_OUTPUT
+          else
+            echo "need_build=true" >> $GITHUB_OUTPUT
+          fi
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # ============================================
+  # 任务1：Windows x64 客户端
+  # ============================================
+  build-windows:
+    needs: check-version
+    if: needs.check-version.outputs.need_build == 'true'
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 安装 Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      # 关键：必须 --recursive，libs/hbb_common 是 submodule
+      - name: 克隆源码（含 submodule）
+        shell: bash
+        run: |
+          git clone --depth 1 --recursive --branch "${{ needs.check-version.outputs.version }}" \
+            https://github.com/rustdesk/rustdesk.git source 2>/dev/null \
+            || git clone --depth 1 --recursive https://github.com/rustdesk/rustdesk.git source
+          cd source && git log --oneline -1
+          echo "--- submodule 校验 ---"
+          ls -la libs/hbb_common/src/config.rs
+
+      - name: 注入服务器配置
+        shell: bash
+        run: bash scripts/inject-config.sh config/custom.txt source
+
+      - name: 编译
+        shell: bash
+        working-directory: source
+        run: |
+          cargo build --release 2>&1 | tail -40
+
+      - name: 校验产物含自建服务器地址
+        shell: bash
+        run: |
+          echo "=== 在二进制中搜索 rd.fuyou135.cn ==="
+          if strings source/target/release/rustdesk.exe 2>/dev/null | grep -q "fuyou135.cn"; then
+            echo "✅ 产物已确认包含自建服务器地址"
+            strings source/target/release/rustdesk.exe | grep "fuyou135.cn" | head -5
+          else
+            echo "❌ 产物中未找到服务器地址 —— 注入失败，拒绝发布"
+            exit 1
+          fi
+
+      - name: 收集产物
+        shell: bash
+        run: |
+          mkdir -p dist
+          cp source/target/release/rustdesk.exe dist/RustDesk-Windows-x64.exe
+          ls -la dist/
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-client
+          path: dist/
+          if-no-files-found: error
+
+  # ============================================
+  # 任务2：macOS Intel (x86_64) 客户端
+  # ============================================
+  build-macos-x86:
+    needs: check-version
+    if: needs.check-version.outputs.need_build == 'true'
+    runs-on: macos-13
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 安装 Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-apple-darwin
+
+      - name: 克隆源码（含 submodule）
+        run: |
+          git clone --depth 1 --recursive --branch "${{ needs.check-version.outputs.version }}" \
+            https://github.com/rustdesk/rustdesk.git source 2>/dev/null \
+            || git clone --depth 1 --recursive https://github.com/rustdesk/rustdesk.git source
+          cd source && git log --oneline -1
+          ls -la libs/hbb_common/src/config.rs
+
+      - name: 注入配置
+        run: bash scripts/inject-config.sh config/custom.txt source
+
+      - name: 编译
+        working-directory: source
+        run: cargo build --release 2>&1 | tail -40
+
+      - name: 校验产物
+        run: |
+          if strings source/target/release/rustdesk 2>/dev/null | grep -q "fuyou135.cn"; then
+            echo "✅ 产物已确认包含自建服务器地址"
+          else
+            echo "❌ 注入失败，拒绝发布"; exit 1
+          fi
+
+      - name: 收集产物
+        run: |
+          mkdir -p dist
+          cp source/target/release/rustdesk dist/RustDesk-macOS-x86_64
+          chmod +x dist/RustDesk-macOS-x86_64
+          ls -la dist/
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos-x86-client
+          path: dist/
+          if-no-files-found: error
+
+  # ============================================
+  # 任务3：Linux ARM64 客户端（麒麟9000x 等）
+  # ============================================
+  build-linux-arm64:
+    needs: check-version
+    if: needs.check-version.outputs.need_build == 'true'
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 安装 Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: 安装系统依赖
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libgtk-3-dev libxcb-randr0-dev libxdo-dev libxfixes-dev \
+            libxcb-shape0-dev libxcb-xfixes0-dev libasound2-dev \
+            libpulse-dev libva-dev libvdpau-dev libssl-dev \
+            libxcb-icccm4-dev libxcb-keysyms1-dev libxcb-image0-dev \
+            libxcb-render-util0-dev libxcb-xinerama0-dev \
+            libxkbcommon-dev libxkbcommon-x11-dev \
+            libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev \
+            clang cmake nasm patchelf
+
+      - name: 克隆源码（含 submodule）
+        run: |
+          git clone --depth 1 --recursive --branch "${{ needs.check-version.outputs.version }}" \
+            https://github.com/rustdesk/rustdesk.git source 2>/dev/null \
+            || git clone --depth 1 --recursive https://github.com/rustdesk/rustdesk.git source
+          cd source && git log --oneline -1
+          ls -la libs/hbb_common/src/config.rs
+
+      - name: 注入配置
+        run: bash scripts/inject-config.sh config/custom.txt source
+
+      - name: 编译
+        working-directory: source
+        run: cargo build --release 2>&1 | tail -40
+
+      - name: 校验产物
+        run: |
+          if strings source/target/release/rustdesk 2>/dev/null | grep -q "fuyou135.cn"; then
+            echo "✅ 产物已确认包含自建服务器地址"
+          else
+            echo "❌ 注入失败，拒绝发布"; exit 1
+          fi
+
+      - name: 收集产物 & 打 deb 包
+        run: |
+          mkdir -p dist
+          cp source/target/release/rustdesk dist/rustdesk-arm64
+          chmod +x dist/rustdesk-arm64
+          cd source
+          cargo install cargo-deb --locked 2>/dev/null || true
+          cargo deb --no-build --no-strip 2>/dev/null || true
+          find target -name "*.deb" -exec cp {} ../dist/ \; 2>/dev/null || true
+          ls -la ../dist/
+          file ../dist/rustdesk-arm64 || true
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-arm64-client
+          path: dist/
+          if-no-files-found: error
+
+  # ============================================
+  # 任务4：汇总发布 Release
+  # ============================================
+  release:
+    needs: [check-version, build-windows, build-macos-x86, build-linux-arm64]
+    if: always() && needs.check-version.outputs.need_build == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: 整理 & 生成校验和
+        run: |
+          mkdir -p release
+          find artifacts -type f -exec cp {} release/ \; 2>/dev/null || true
+          cd release
+          ls -la
+          sha256sum * > SHA256SUMS.txt 2>/dev/null || true
+          cat SHA256SUMS.txt
+
+      - name: 发布 Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: custom-${{ needs.check-version.outputs.version }}
+          name: "定制客户端 v${{ needs.check-version.outputs.version }}"
+          body: |
+            ## RustDesk 定制客户端 v${{ needs.check-version.outputs.version }}
+
+            已内置服务器配置，**安装即用，无需手动填写任何设置**。
+
+            | 平台 | 文件 | 适用设备 |
+            |---|---|---|
+            | Windows x64 | `RustDesk-Windows-x64.exe` | 主流 Windows PC |
+            | macOS Intel | `RustDesk-macOS-x86_64` | Intel 芯片 Mac |
+            | Linux ARM64 | `rustdesk-arm64` / `*.deb` | 麒麟9000x 等 ARM64 |
+
+            ### 内置配置
+            | 项目 | 值 |
+            |---|---|
+            | ID 服务器 | `id.fuyou135.cn` |
+            | 中继服务器 | `id.fuyou135.cn` |
+            | API 服务器 | `https://rd.fuyou135.cn` |
+            | Key | `RxzqHWPfpghWuNd5OuapXycHg1GcqlpWeCiyRgG32U0=` |
+
+            ### 安装说明
+            - **Windows**：双击运行，首次可能需在杀软中放行
+            - **macOS**：未签名，需在「系统设置 → 隐私与安全性」中允许，或执行 `xattr -cr /path/to/RustDesk`
+            - **Linux ARM64**：`chmod +x rustdesk-arm64 && ./rustdesk-arm64`，或 `sudo dpkg -i *.deb`
+
+            > 安装后直接登录 `https://rd.fuyou135.cn` 的账号，即可看到名下所有设备。
+          files: release/*
+          fail_on_unmatched_files: false
+          make_latest: false
