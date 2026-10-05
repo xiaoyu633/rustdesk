@@ -48,13 +48,33 @@ jobs:
             VERSION=$(curl -sL https://api.github.com/repos/rustdesk/rustdesk/releases/latest | jq -r '.tag_name // empty')
             [ -z "$VERSION" ] && VERSION=$(curl -sL "https://api.github.com/repos/rustdesk/rustdesk/tags?per_page=1" | jq -r '.[0].name // empty')
           fi
+          if [ -z "$VERSION" ]; then
+            echo "FAIL: 无法获取上游版本号"
+            exit 1
+          fi
           echo "上游最新版本: $VERSION"
           echo "version=$VERSION" >> $GITHUB_OUTPUT
 
-          if gh release view "custom-$VERSION" >/dev/null 2>&1; then
-            echo "该版本已构建过，跳过"
+          # 重要：只有"已正式发布(非草稿)且带附件"的 Release 才算构建完成。
+          # 只看 tag 是否会被失败的草稿 Release 永久锁死（草稿也会占用 tag）。
+          TAG="custom-$VERSION"
+          DRAFT=$(gh api "repos/${{ github.repository }}/releases/tags/$TAG" \
+                    --jq '.draft' 2>/dev/null || echo "missing")
+          ASSETS=$(gh api "repos/${{ github.repository }}/releases/tags/$TAG" \
+                    --jq '.assets | length' 2>/dev/null || echo "0")
+
+          echo "已有 Release: draft=$DRAFT, assets=$ASSETS"
+
+          if [ "$DRAFT" = "false" ] && [ "$ASSETS" -gt 0 ] 2>/dev/null; then
+            echo "该版本已成功构建并发布，跳过"
             echo "need_build=false" >> $GITHUB_OUTPUT
           else
+            if [ "$DRAFT" != "missing" ]; then
+              echo "发现不完整 Release（草稿或无附件），将其删除后重建"
+              RID=$(gh api "repos/${{ github.repository }}/releases/tags/$TAG" --jq '.id' 2>/dev/null || echo "")
+              [ -n "$RID" ] && gh api -X DELETE "repos/${{ github.repository }}/releases/$RID" 2>/dev/null || true
+              gh api -X DELETE "repos/${{ github.repository }}/git/refs/tags/$TAG" 2>/dev/null || true
+            fi
             echo "need_build=true" >> $GITHUB_OUTPUT
           fi
         env:
