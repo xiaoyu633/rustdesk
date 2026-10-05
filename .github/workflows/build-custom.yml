@@ -173,9 +173,15 @@ jobs:
           fi
           echo "=== 关键库就位校验 ==="
           LIBDIR="$VCPKG_ROOT/installed/x64-windows-static/lib"
+          FAILED=0
           for lib in aom vpx yuv jpeg opus; do
-            ls "$LIBDIR" | grep -qi "lib*$lib" && echo "OK   $lib" || { echo "FAIL $lib"; exit 1; }
+            if ls "$LIBDIR" | grep -qi "$lib"; then
+              echo "OK   $lib"
+            else
+              echo "FAIL $lib not found in $LIBDIR"; FAILED=1
+            fi
           done
+          [ "$FAILED" -eq 0 ] || exit 1
 
       - name: 编译
         working-directory: source
