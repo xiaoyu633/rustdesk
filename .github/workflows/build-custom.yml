@@ -94,17 +94,27 @@ jobs:
         shell: bash
         working-directory: source
         run: |
-          cargo build --release 2>&1 | tail -40
+          set -o pipefail
+          cargo build --release 2>&1 | tee /tmp/build.log
+          exit ${PIPESTATUS[0]}
+
+      - name: 编译失败时输出日志尾部
+        if: failure()
+        shell: bash
+        run: tail -60 /tmp/build.log || true
 
       - name: 校验产物含自建服务器地址
         shell: bash
         run: |
-          echo "=== 在二进制中搜索 rd.fuyou135.cn ==="
-          if strings source/target/release/rustdesk.exe 2>/dev/null | grep -q "fuyou135.cn"; then
-            echo "✅ 产物已确认包含自建服务器地址"
-            strings source/target/release/rustdesk.exe | grep "fuyou135.cn" | head -5
+          BIN=source/target/release/rustdesk.exe
+          if [ ! -f "$BIN" ]; then
+            echo "FAIL: 二进制未生成: $BIN"; exit 1
+          fi
+          if strings "$BIN" | grep -q "fuyou135.cn"; then
+            echo "OK: 产物已确认包含自建服务器地址"
+            strings "$BIN" | grep "fuyou135.cn" | head -5
           else
-            echo "❌ 产物中未找到服务器地址 —— 注入失败，拒绝发布"
+            echo "FAIL: 产物中未找到服务器地址 —— 注入失败，拒绝发布"
             exit 1
           fi
 
@@ -149,14 +159,25 @@ jobs:
 
       - name: 编译
         working-directory: source
-        run: cargo build --release 2>&1 | tail -40
+        run: |
+          set -o pipefail
+          cargo build --release 2>&1 | tee /tmp/build.log
+          exit ${PIPESTATUS[0]}
+
+      - name: 编译失败时输出日志尾部
+        if: failure()
+        run: tail -60 /tmp/build.log
 
       - name: 校验产物
         run: |
-          if strings source/target/release/rustdesk 2>/dev/null | grep -q "fuyou135.cn"; then
-            echo "✅ 产物已确认包含自建服务器地址"
+          BIN=source/target/release/rustdesk
+          if [ ! -f "$BIN" ]; then
+            echo "FAIL: 二进制未生成: $BIN"; exit 1
+          fi
+          if strings "$BIN" | grep -q "fuyou135.cn"; then
+            echo "OK: 产物已确认包含自建服务器地址"
           else
-            echo "❌ 注入失败，拒绝发布"; exit 1
+            echo "FAIL: 注入失败，拒绝发布"; exit 1
           fi
 
       - name: 收集产物
@@ -196,7 +217,32 @@ jobs:
             libxcb-render-util0-dev libxcb-xinerama0-dev \
             libxkbcommon-dev libxkbcommon-x11-dev \
             libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev \
-            clang cmake nasm patchelf
+            clang cmake nasm patchelf \
+            libyuv-dev pkg-config
+
+      # scrap 构建脚本优先走 pkg-config（feature=linux-pkg-config）。
+      # 但 Ubuntu 的 libyuv-dev 不提供 libyuv.pc，需要手工补一个，否则会
+      # 回落到 vcpkg/homebrew 分支并 panic（VCPKG_ROOT 未设置）。
+      - name: 为 libyuv 生成 pkg-config 描述文件
+        run: |
+          ARCH=$(dpkg-architecture -qDEB_HOST_MULTIARCH 2>/dev/null || echo "aarch64-linux-gnu")
+          sudo tee /usr/lib/${ARCH}/pkgconfig/libyuv.pc > /dev/null <<EOF
+          prefix=/usr
+          exec_prefix=\${prefix}
+          libdir=\${exec_prefix}/lib/${ARCH}
+          includedir=\${prefix}/include
+
+          Name: libyuv
+          Description: YUV conversion and scaling library
+          Version: 0.0.1
+          Libs: -L\${libdir} -lyuv
+          Cflags: -I\${includedir}
+          EOF
+          echo "--- 生成的 libyuv.pc ---"
+          cat /usr/lib/${ARCH}/pkgconfig/libyuv.pc
+          echo "--- pkg-config 验证 ---"
+          pkg-config --exists libyuv && echo "OK: pkg-config found libyuv" || { echo "FAIL: pkg-config cannot find libyuv"; exit 1; }
+          pkg-config --cflags --libs libyuv
 
       - name: 克隆源码（含 submodule）
         run: |
@@ -209,16 +255,30 @@ jobs:
       - name: 注入配置
         run: bash scripts/inject-config.sh config/custom.txt source
 
+      # 注意：不要用 `cargo build | tail`，管道会吞掉 cargo 的退出码，
+      # 导致编译失败被误判为成功。改为重定向到日志、单独 tail。
       - name: 编译
         working-directory: source
-        run: cargo build --release 2>&1 | tail -40
+        run: |
+          set -o pipefail
+          cargo build --release --features linux-pkg-config 2>&1 | tee /tmp/build.log
+          exit ${PIPESTATUS[0]}
+
+      - name: 编译失败时输出日志尾部
+        if: failure()
+        run: tail -60 /tmp/build.log
 
       - name: 校验产物
         run: |
-          if strings source/target/release/rustdesk 2>/dev/null | grep -q "fuyou135.cn"; then
-            echo "✅ 产物已确认包含自建服务器地址"
+          BIN=source/target/release/rustdesk
+          if [ ! -f "$BIN" ]; then
+            echo "FAIL: 二进制未生成: $BIN"; exit 1
+          fi
+          if strings "$BIN" | grep -q "fuyou135.cn"; then
+            echo "OK: 产物已确认包含自建服务器地址"
+            strings "$BIN" | grep "fuyou135.cn" | head -5
           else
-            echo "❌ 注入失败，拒绝发布"; exit 1
+            echo "FAIL: 产物中未找到服务器地址 —— 注入失败，拒绝发布"; exit 1
           fi
 
       - name: 收集产物 & 打 deb 包
