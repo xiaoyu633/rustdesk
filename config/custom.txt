@@ -1,0 +1,46 @@
+# RustDesk 客户端定制配置文件
+# ============================================
+# 本文件定义要嵌入客户端的所有服务器参数
+# 修改后重新触发构建即可生成新版定制客户端
+# ============================================
+
+# ID/中继服务器地址（RustDesk 客户端填写处）
+RENDEZVOUS_SERVER=id.fuyou135.cn
+
+# 中继服务器（留空则使用与ID服务器相同地址）
+RELAY_SERVER=id.fuyou135.cn
+
+# API 服务器地址（实现"登录后自动显示名下设备"的关键）
+API_SERVER=https://rd.fuyou135.cn
+
+# 服务器公钥（hbbs 生成，用于加密通信）
+KEY=RxzqHWPfpghWuNd5OuapXycHg1GcqlpWeCiyRgG32U0=
+
+# 客户端显示名称（会显示在标题栏和关于页）
+APP_NAME=RustDesk
+
+# 默认设置
+# 是否允许用户修改服务器设置（0=允许, 1=禁止）
+# 建议1，防止用户误删配置导致失联
+LOCK_SETTINGS=0
+
+# 是否允许远程打印
+ENABLE_REMOTE_PRINTER=Y
+
+# 是否允许语音通话
+ENABLE_AUDIO=Y
+
+# 是否允许文件传输
+ENABLE_FILE_TRANSFER=Y
+
+# 是否允许TCP隧道
+ENABLE_TCP_TUNNEL=Y
+
+# 是否允许剪贴板同步
+ENABLE_CLIPBOARD=Y
+
+# 是否允许开机自启（1=默认开启）
+ENABLE_AUTO_START=1
+
+# 是否隐藏设置界面中的服务器配置项（1=隐藏）
+HIDE_SERVER_SETTINGS=0
