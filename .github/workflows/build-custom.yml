@@ -185,6 +185,7 @@ jobs:
 
       - name: 编译
         working-directory: source
+        shell: bash
         env:
           VCPKG_ROOT: C:\vcpkg
         run: |
