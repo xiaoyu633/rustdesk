@@ -478,7 +478,7 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: macos-x86-client
-          path: dist/
+          path: dist/RustDesk-macOS-x86_64.dmg
           if-no-files-found: error
 
   # ============================================
@@ -621,6 +621,12 @@ jobs:
           mkdir -p release
           find artifacts -type f -exec cp {} release/ \; 2>/dev/null || true
           cd release
+          # 只保留预期产物，避免 .app 内部文件（Info.plist / icon.png / 裸二进制）混入
+          find . -maxdepth 1 -type f \
+            ! -name 'RustDesk-Windows-x64.exe' \
+            ! -name 'RustDesk-macOS-x86_64.dmg' \
+            ! -name 'rustdesk-arm64' \
+            ! -name '*.deb' -delete
           ls -la
           sha256sum * > SHA256SUMS.txt 2>/dev/null || true
           cat SHA256SUMS.txt
