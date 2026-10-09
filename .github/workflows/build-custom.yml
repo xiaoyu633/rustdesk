@@ -265,16 +265,77 @@ jobs:
           path: ~/vcpkg-bincache
           key: vcpkg-x64-osx-9e593bb-aom-vpx-yuv-jpeg-opus
 
-      - name: 安装 vcpkg（固定官方 commit，与官方流水线一致）
-        uses: lukka/run-vcpkg@b1a0dd252f06b9e25b3c022a9a03bd7a427fb6a2 # v11
+      # vcpkg 整套目录缓存：命中后秒过，无需 clone + 下载
+      - name: 缓存 vcpkg 目录
+        id: vcpkgdir
+        uses: actions/cache@v4
         with:
-          vcpkgDirectory: ${{ github.workspace }}/vcpkg
-          vcpkgGitCommitId: 9e593bb18ea69cc5095e012465dcd675a822ed0d
+          path: ${{ github.workspace }}/vcpkg
+          key: vcpkg-tool-x64-osx-9e593bb-2026-07-27
+
+      # 不用 lukka/run-vcpkg：其 bootstrap 会直连 github.com 下载 vcpkg-macos，
+      # runner 上常出现 "Failed to connect to github.com:443" 导致 job 失败。
+      # 改为手动 clone 源码 + 多源下载预编译可执行文件。
+      - name: 安装 vcpkg（手动，多源回退）
+        if: steps.vcpkgdir.outputs.cache-hit != 'true'
+        run: |
+          set -e
+          VCPKG_DIR="${{ github.workspace }}/vcpkg"
+          rm -rf "$VCPKG_DIR"
+          echo "=== 1) 克隆 vcpkg 源码 ==="
+          CLONE_OK=0
+          for repo in https://github.com/microsoft/vcpkg.git \
+                      https://ghfast.top/https://github.com/microsoft/vcpkg.git \
+                      https://gh-proxy.com/https://github.com/microsoft/vcpkg.git; do
+            rm -rf "$VCPKG_DIR"
+            echo "尝试: $repo"
+            if git clone --depth 1 "$repo" "$VCPKG_DIR" 2>/dev/null; then
+              CLONE_OK=1; echo "OK 采用: $repo"; break
+            fi
+          done
+          [ "$CLONE_OK" = "1" ] || { echo "FAIL: vcpkg 源码克隆失败（所有源）"; exit 1; }
+
+          cd "$VCPKG_DIR"
+          # 切到固定官方 commit；失败则沿用 HEAD，不中断流程
+          if git fetch -q --depth 1 origin 9e593bb18ea69cc5095e012465dcd675a822ed0d 2>/dev/null \
+             && git checkout -q -f 9e593bb18ea69cc5095e012465dcd675a822ed0d 2>/dev/null; then
+            echo "已切到固定 commit"
+          else
+            echo "WARN: 无法切到固定 commit，沿用 HEAD（不影响依赖构建）"
+          fi
+          echo "vcpkg commit: $(git rev-parse --short HEAD)"
+
+          echo "=== 2) 下载预编译 vcpkg 可执行文件（多源回退） ==="
+          BASE="https://github.com/microsoft/vcpkg-tool/releases/download/2026-07-27/vcpkg-macos"
+          for url in "$BASE" \
+                     "https://ghfast.top/$BASE" \
+                     "https://gh-proxy.com/$BASE"; do
+            echo "尝试: $url"
+            if curl -fsSL --connect-timeout 15 --max-time 240 -o "$VCPKG_DIR/vcpkg" "$url"; then
+              xattr -d com.apple.quarantine "$VCPKG_DIR/vcpkg" 2>/dev/null || true
+              chmod +x "$VCPKG_DIR/vcpkg"
+              if "$VCPKG_DIR/vcpkg" version >/dev/null 2>&1; then
+                echo "OK 采用: $url"
+                break
+              fi
+              echo "  可执行文件校验失败，换源"
+              rm -f "$VCPKG_DIR/vcpkg"
+            else
+              echo "  下载失败，换源"
+            fi
+          done
+          if [ ! -x "$VCPKG_DIR/vcpkg" ]; then
+            echo "FAIL: 所有源都无法获取 vcpkg 可执行文件"
+            exit 1
+          fi
+          "$VCPKG_DIR/vcpkg" version
 
       - name: 安装 RustDesk 系统依赖
         env:
           VCPKG_ROOT: ${{ github.workspace }}/vcpkg
           VCPKG_DEFAULT_BINARY_CACHE: ${{ github.workspace }}/vcpkg-bincache
+          # 显式用本地 files 缓存，避免 vcpkg 自动启用 x-gha（无 token 时会报错）
+          VCPKG_BINARY_SOURCES: clear;files,${{ github.workspace }}/vcpkg-bincache,readwrite
         run: |
           # 与 Windows 同理：离开 checkout 目录（避开上游 vcpkg.json 的 manifest 模式）
           WORKDIR=$(mktemp -d) && cd "$WORKDIR"
