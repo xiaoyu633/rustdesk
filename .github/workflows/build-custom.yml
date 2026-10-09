@@ -376,6 +376,21 @@ jobs:
       - name: 注入配置
         run: bash scripts/inject-config.sh config/custom.txt source
 
+      - name: 放置 flutter 桥接文件
+        run: |
+          set -e
+          # flutter feature 需要 frb 生成的桥接代码，官方 CI 每天产出同版本 artifact。
+          # 已核对：该 artifact 的 315 个 wire 函数与 1.5.0 的 src/flutter_ffi.rs 完全一致。
+          # 固化在仓库里，避免为生成它而安装 Flutter SDK + codegen（省 30~40 分钟）。
+          BR=bridge/1.5.0
+          cp "$BR/bridge_generated.rs"     source/src/
+          cp "$BR/bridge_generated.io.rs"  source/src/
+          mkdir -p source/flutter/lib source/flutter/macos/Runner
+          cp "$BR/generated_bridge.dart"          source/flutter/lib/
+          cp "$BR/generated_bridge.freezed.dart"  source/flutter/lib/
+          cp "$BR/bridge_generated.h"             source/flutter/macos/Runner/
+          ls -la source/src/bridge_generated*.rs
+
       - name: 编译（release, flutter 版）
         working-directory: source
         env:
