@@ -242,8 +242,8 @@ jobs:
         with:
           targets: x86_64-apple-darwin
 
-      - name: 安装 cargo-bundle（打包 .app/.dmg 必需）
-        run: cargo install cargo-bundle
+      # 说明：不再依赖 cargo-bundle —— 新版 cargo-bundle 不认 RustDesk
+      # Cargo.toml 里的旧字段 `osx_minimum_system_version`，直接手动构造 .app。
 
       # aom/libvpx 的 x86_64 汇编必须用 NASM 2.x，brew 的 nasm 是 3.x（不兼容重写版）
       - name: 安装构建工具（LLVM / pkg-config / NASM 2.16）
@@ -305,34 +305,92 @@ jobs:
       - name: 注入配置
         run: bash scripts/inject-config.sh config/custom.txt source
 
-      - name: 编译并打包 .app
+      - name: 编译（release）
         working-directory: source
         env:
           VCPKG_ROOT: ${{ github.workspace }}/vcpkg
         run: |
           set -o pipefail
-          cargo --locked bundle --release 2>&1 | tee /tmp/build.log
+          cargo --locked build --release 2>&1 | tee /tmp/build.log
           exit ${PIPESTATUS[0]}
 
       - name: 编译失败时输出日志尾部
         if: failure()
         run: tail -60 /tmp/build.log
 
-      - name: 打包为 .dmg 安装包
+      - name: 手动构造 .app 并打包为 .dmg
         run: |
-          APP=source/target/release/bundle/osx/RustDesk.app
-          if [ ! -d "$APP" ]; then echo "FAIL: .app 未生成"; ls -R source/target/release/bundle 2>/dev/null; exit 1; fi
-          # macOS 版需要 sciter 动态库（sciter-rs 构建时下载到源码根）
+          set -e
+          BIN=source/target/release/rustdesk
+          if [ ! -f "$BIN" ]; then echo "FAIL: 二进制未生成: $BIN"; exit 1; fi
+
+          APP=dist/RustDesk.app
+          rm -rf "$APP"; mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
+
+          # 1) 主可执行文件
+          cp "$BIN" "$APP/Contents/MacOS/rustdesk"
+          chmod +x "$APP/Contents/MacOS/rustdesk"
+
+          # 2) sciter 动态库（macOS 版必需，sciter-rs 构建时下载到源码根/产物目录）
           for p in source/libsciter.dylib source/target/release/libsciter.dylib libsciter.dylib; do
             if [ -f "$p" ]; then cp "$p" "$APP/Contents/MacOS/"; echo "sciter: $p"; break; fi
           done
-          mkdir -p dist
+          if [ ! -f "$APP/Contents/MacOS/libsciter.dylib" ]; then
+            echo "WARN: 未找到 libsciter.dylib，尝试全盘搜索"
+            find source -name 'libsciter*.dylib' 2>/dev/null | head -3
+          fi
+          # 让主程序能从同目录加载 libsciter.dylib
+          install_name_tool -add_rpath "@executable_path" "$APP/Contents/MacOS/rustdesk" 2>/dev/null || true
+
+          # 3) 图标（RustDesk 仓库自带 32x32/128x128 等 png）
+          ICON_SRC=$(ls source/res/icon.png source/res/icon_32.png 2>/dev/null | head -1 || true)
+          [ -n "$ICON_SRC" ] && cp "$ICON_SRC" "$APP/Contents/Resources/icon.png" || true
+
+          # 4) 版本号（取自 rustdesk 源码 Cargo.toml）
+          VER=$(grep -m1 '^version' source/Cargo.toml | sed -E 's/.*"([^"]+)".*/\1/')
+          [ -z "$VER" ] && VER="1.3.9"
+
+          # 5) Info.plist（用 printf 逐行输出，规避 YAML block scalar 与 heredoc 缩进冲突）
+          PLIST="$APP/Contents/Info.plist"
+          {
+            printf '%s\n' '<?xml version="1.0" encoding="UTF-8"?>'
+            printf '%s\n' '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">'
+            printf '%s\n' '<plist version="1.0">'
+            printf '%s\n' '<dict>'
+            printf '  <key>CFBundleDevelopmentRegion</key><string>en</string>\n'
+            printf '  <key>CFBundleExecutable</key><string>rustdesk</string>\n'
+            printf '  <key>CFBundleIdentifier</key><string>com.carriez.rustdesk</string>\n'
+            printf '  <key>CFBundleInfoDictionaryVersion</key><string>6.0</string>\n'
+            printf '  <key>CFBundleName</key><string>RustDesk</string>\n'
+            printf '  <key>CFBundleDisplayName</key><string>RustDesk</string>\n'
+            printf '  <key>CFBundlePackageType</key><string>APPL</string>\n'
+            printf '  <key>CFBundleShortVersionString</key><string>%s</string>\n' "$VER"
+            printf '  <key>CFBundleVersion</key><string>%s</string>\n' "$VER"
+            printf '%s\n' '  <key>LSMinimumSystemVersion</key><string>10.14</string>'
+            printf '%s\n' '  <key>NSHighResolutionCapable</key><true/>'
+            printf '%s\n' '  <key>NSPrincipalClass</key><string>NSApplication</string>'
+            printf '%s\n' '  <key>CFBundleIconFile</key><string>icon.png</string>'
+            printf '%s\n' '  <key>LSApplicationCategoryType</key><string>public.app-category.utilities</string>'
+            printf '%s\n' '  <key>CFBundleURLTypes</key>'
+            printf '%s\n' '  <array><dict>'
+            printf '%s\n' '    <key>CFBundleURLName</key><string>com.carriez.rustdesk</string>'
+            printf '%s\n' '    <key>CFBundleURLSchemes</key><array><string>rustdesk</string></array>'
+            printf '%s\n' '  </dict></array>'
+            printf '  <key>NSMicrophoneUsageDescription</key><string>RustDesk 需要使用麦克风进行语音通话</string>\n'
+            printf '  <key>NSCameraUsageDescription</key><string>RustDesk 需要使用摄像头进行视频通话</string>\n'
+            printf '%s\n' '</dict>'
+            printf '%s\n' '</plist>'
+          } > "$PLIST"
+          plutil -lint "$PLIST" 2>/dev/null || echo "WARN: plutil 校验跳过"
+
+          # 6) 去掉隔离属性 + 打 dmg
+          xattr -cr "$APP" 2>/dev/null || true
           hdiutil create -volname RustDesk -srcfolder "$APP" -ov "dist/RustDesk-macOS-x86_64.dmg"
           ls -la dist/
 
       - name: 校验产物
         run: |
-          BIN=source/target/release/bundle/osx/RustDesk.app/Contents/MacOS/rustdesk
+          BIN=dist/RustDesk.app/Contents/MacOS/rustdesk
           if [ ! -f "$BIN" ]; then
             echo "FAIL: 二进制未生成: $BIN"; exit 1
           fi
