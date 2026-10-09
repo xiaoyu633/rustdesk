@@ -306,26 +306,36 @@ jobs:
           echo "vcpkg commit: $(git rev-parse --short HEAD)"
 
           echo "=== 2) 下载预编译 vcpkg 可执行文件（多源回退） ==="
-          BASE="https://github.com/microsoft/vcpkg-tool/releases/download/2026-07-27/vcpkg-macos"
-          for url in "$BASE" \
-                     "https://ghfast.top/$BASE" \
-                     "https://gh-proxy.com/$BASE"; do
-            echo "尝试: $url"
-            if curl -fsSL --connect-timeout 15 --max-time 240 -o "$VCPKG_DIR/vcpkg" "$url"; then
-              xattr -d com.apple.quarantine "$VCPKG_DIR/vcpkg" 2>/dev/null || true
-              chmod +x "$VCPKG_DIR/vcpkg"
-              if "$VCPKG_DIR/vcpkg" version >/dev/null 2>&1; then
-                echo "OK 采用: $url"
-                break
+          # 版本号取自源码自带的 metadata，保证与该 commit 匹配；读不到则用已知版本
+          TOOL_TAG=$(grep -m1 '^VCPKG_TOOL_RELEASE_TAG=' scripts/vcpkg-tool-metadata.txt 2>/dev/null | cut -d= -f2 | tr -d '\r')
+          [ -z "$TOOL_TAG" ] && TOOL_TAG="2026-07-27"
+          echo "vcpkg-tool 版本: $TOOL_TAG"
+
+          # 外层：先试 metadata 里的版本，全失败则回退已知版本；内层：多镜像源
+          for tag in "$TOOL_TAG" 2026-07-27; do
+            [ "$tag" = "$TOOL_TAG" ] || echo "--- 回退到已知版本 2026-07-27 ---"
+            BASE="https://github.com/microsoft/vcpkg-tool/releases/download/$tag/vcpkg-macos"
+            for url in "$BASE" \
+                       "https://ghfast.top/$BASE" \
+                       "https://gh-proxy.com/$BASE"; do
+              echo "尝试: $url"
+              if curl -fsSL --connect-timeout 15 --max-time 240 -o "$VCPKG_DIR/vcpkg" "$url"; then
+                xattr -d com.apple.quarantine "$VCPKG_DIR/vcpkg" 2>/dev/null || true
+                chmod +x "$VCPKG_DIR/vcpkg"
+                if "$VCPKG_DIR/vcpkg" version >/dev/null 2>&1; then
+                  echo "OK 采用: $url"
+                  break
+                fi
+                echo "  可执行文件校验失败，换源"
+                rm -f "$VCPKG_DIR/vcpkg"
+              else
+                echo "  下载失败，换源"
               fi
-              echo "  可执行文件校验失败，换源"
-              rm -f "$VCPKG_DIR/vcpkg"
-            else
-              echo "  下载失败，换源"
-            fi
+            done
+            [ -x "$VCPKG_DIR/vcpkg" ] && break
           done
           if [ ! -x "$VCPKG_DIR/vcpkg" ]; then
-            echo "FAIL: 所有源都无法获取 vcpkg 可执行文件"
+            echo "FAIL: 所有版本与源都无法获取 vcpkg 可执行文件"
             exit 1
           fi
           "$VCPKG_DIR/vcpkg" version
