@@ -445,6 +445,9 @@ jobs:
           ls "$APP_SRC/Contents/Frameworks" 2>/dev/null | head -20
 
           # 3) 拷出并替换可执行文件（名字以 Info.plist 的 CFBundleExecutable 为准）
+          #    注意：必须 mkdir -p dist，否则 cp -R 因父目录不存在直接失败
+          #    （macOS/BSD cp 不像 GNU cp 那样自动建中间目录）
+          mkdir -p dist
           rm -rf dist/RustDesk.app
           cp -R "$APP_SRC" dist/RustDesk.app
           chmod -R u+w dist/RustDesk.app
